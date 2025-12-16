@@ -251,10 +251,11 @@ class Scheduler(SchedulerInterface):
             # print(f"=====================self.enable_dcpp:{self.enable_dcpp}|request.is_dcpp:{request.is_dcpp}")
             # print(f"=====================request.num_tokens:{request.num_tokens}|request.num_computed_tokens:{request.num_computed_tokens}|request.dcpp_scheduled_chunk:{request.dcpp_scheduled_chunk}|token_budget:{token_budget.get_flops()}")
             if self.enable_dcpp and request.is_dcpp and self.attn_estimator is not None:
+                # 后续可以做到budget里面
                 dcpp_equitable_tokens = num_new_tokens
                 # total_tokens = self.scheduler_config.long_prefill_token_threshold \
                 #     if self.scheduler_config.long_prefill_token_threshold > 0 else token_budget
-                target_tokens = min(token_budget.get_flops(), self.max_num_scheduled_flops // 8)
+                target_tokens = min(token_budget.get_flops(), self.max_num_scheduled_flops)
 
                 num_new_tokens, dcpp_scheduled_chunk = \
                         self.attn_estimator.compute_chunk_size_with_flops(
@@ -473,7 +474,23 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
+                    # 尝试waiting也加入flops约束
+                    if self.enable_dcpp and request.is_dcpp and self.attn_estimator is not None:
+                        target_tokens = min(token_budget.get_flops(), self.max_num_scheduled_flops)
+                        dcpp_equitable_tokens = num_new_tokens
+                        num_new_tokens, dcpp_scheduled_chunk = \
+                                self.attn_estimator.compute_chunk_size_with_flops(
+                                    num_computed_tokens,
+                                    target_tokens,
+                                    self.cache_config.block_size)
 
+                        # 1.dcpp 2.chunk_size 3.request需要计算的 4.floor
+                        # NOTE: Prevent short tail effect
+                        floor = self.dcpp_min_chunk if self.dcpp_min_chunk and self.dcpp_min_chunk > 0 else 0
+                        num_new_tokens = min(num_new_tokens, dcpp_equitable_tokens)
+                        num_new_tokens = min(request.num_tokens - num_computed_tokens,
+                                            max(floor, num_new_tokens))
+                                        
                     num_new_tokens = min(num_new_tokens, token_budget.get(False))
                     assert num_new_tokens > 0
 
@@ -569,7 +586,7 @@ class Scheduler(SchedulerInterface):
 
                 # print(f"======================================waiting===============================================")
                 # print(f"===================================num_new_tokens:{num_new_tokens}|request.num_computed_tokens:{request.num_computed_tokens}")
-                token_budget.consume(num_new_tokens, request.num_computed_tokens,False)
+                token_budget.consume(num_new_tokens, num_computed_tokens, False)
                 # print(f"===================================token_budget.get():{token_budget.get()}")
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens

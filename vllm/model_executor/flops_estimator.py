@@ -231,8 +231,8 @@ class BaseModelEstimator(ABC):
             chunk_size: 估算的chunk大小
             scheduled_flops: 实际消耗的flops
         """
-        test_c1 = block_size
-        test_c2 = block_size * 2
+        test_c1 = block_size * 10
+        test_c2 = block_size * 20
         
         f1 = self.calculate_current_flops(test_c1, hist_seq_len, layer_idx)
         f2 = self.calculate_current_flops(test_c2, hist_seq_len, layer_idx)
@@ -241,16 +241,41 @@ class BaseModelEstimator(ABC):
         # FLOPs ≈ a·C + b·C·(C+H)
         # 求a和b
         det = test_c1 * test_c2 * (test_c2 - test_c1)
-        b = (test_c2 * f1 - test_c1 * f2) / det
+        b = (test_c1 * f2 - test_c2 * f1) / det
         a = (f1 - b * test_c1 * (test_c1 + H)) / test_c1
-        
-        # b*C² + (a + b*H)*C - target_flops = 0
-        A = b
-        B = a + b * H
-        C_coeff = -target_flops
-        discriminant = B**2 - 4*A*C_coeff
-        chunk_size = (-B + discriminant**0.5) / (2 * A)
+        # print(f"=======================================================================")
+        # print(f"============hist_seq_len:{hist_seq_len}|target_flops:{target_flops}|")
+        # print(f"============a:{a}|b:{b}")
+        # print(f"============f1:{f1}|f2:{f2}|det:{det}")
+        # print(f"================chunk_size:{chunk_size}|block_size:{block_size}")
 
+        if b <= 0 or a <= 0:
+            # a和b应该为正，如果为负说明二次模型不合适
+            # 使用线性模型：FLOPs ≈ (a + b*H) * C
+            
+            linear_coeff = (f2 - f1) / (test_c2 - test_c1)
+            chunk_size = target_flops / linear_coeff
+        else:
+            # b为正，使用二次模型
+            # b*C² + (a + b*H)*C - target_flops = 0
+            A = b
+            B = a + b * H
+            C_coeff = -target_flops
+            
+            discriminant = B**2 - 4 * A * C_coeff
+            chunk_size = (-B + discriminant**0.5) / (2 * A)
+        
+        
+        # # b*C² + (a + b*H)*C - target_flops = 0
+        # A = b
+        # B = a + b * H
+        # C_coeff = -target_flops
+        # discriminant = B**2 - 4*A*C_coeff
+        # chunk_size = (-B + discriminant**0.5) / (2 * A)
+        # print(f"=======================================================================")
+        # print(f"============hist_seq_len:{hist_seq_len}|target_flops:{target_flops}|")
+        # print(f"============a:{a}|b:{b}")
+        # print(f"============f1:{f1}|f2:{f2}|det:{det}")
         # print(f"================chunk_size:{chunk_size}|block_size:{block_size}")
         
         chunk_size = max(block_size, int(chunk_size))
