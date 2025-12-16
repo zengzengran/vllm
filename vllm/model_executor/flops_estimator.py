@@ -196,6 +196,69 @@ class BaseModelEstimator(ABC):
         dcpp_chunk = min(dcpp_chunk, seq_len - hist_seq_len)
         return dcpp_chunk, scheduled_chunk
     
+    def calculate_current_flops(self, chunk_size:int, hist_seq_len:int, layer_idx: Optional[int] = None) -> int:
+        seq_len = hist_seq_len + chunk_size
+        
+        proj_flops, attn_flops = self.calculate_attention_flops(chunk_size, seq_len)
+        # Apply global attention calibration to better match wall-clock
+        attn_flops = attn_flops * self.attn_flops_scale
+        ffn_flops = self.calculate_ffn_flops(chunk_size, layer_idx)
+        other_flops = self.calculate_other_flops(chunk_size)
+
+        total_flops = ffn_flops + other_flops + proj_flops + attn_flops
+        return total_flops
+
+    def compute_chunk_size_with_flops(self,
+                                      hist_seq_len: int,
+                                      target_flops: int,
+                                      block_size: int,
+                                      layer_idx: Optional[int] = None) -> int:
+        """                            
+        FLOPs ≈ a·C + b·C·(C+H)
+        C = chunk_size
+        H = hist_seq_len
+        a = 线性项系数(FFN+投影+残差)
+        b = 注意力二次项系数
+        后续 a和b的计算可以提出来 作为init
+        
+        Args:
+            hist_seq_len: KV缓存长度
+            target_flops: 目标FLOPs
+            block_size: 块大小对齐
+            layer_idx: 特定层索引
+            
+        Returns:
+            chunk_size: 估算的chunk大小
+            scheduled_flops: 实际消耗的flops
+        """
+        test_c1 = block_size
+        test_c2 = block_size * 2
+        
+        f1 = self.calculate_current_flops(test_c1, hist_seq_len, layer_idx)
+        f2 = self.calculate_current_flops(test_c2, hist_seq_len, layer_idx)
+        
+        H = hist_seq_len
+        # FLOPs ≈ a·C + b·C·(C+H)
+        # 求a和b
+        det = test_c1 * test_c2 * (test_c2 - test_c1)
+        b = (test_c2 * f1 - test_c1 * f2) / det
+        a = (f1 - b * test_c1 * (test_c1 + H)) / test_c1
+        
+        # b*C² + (a + b*H)*C - target_flops = 0
+        A = b
+        B = a + b * H
+        C_coeff = -target_flops
+        discriminant = B**2 - 4*A*C_coeff
+        chunk_size = (-B + discriminant**0.5) / (2 * A)
+
+        # print(f"================chunk_size:{chunk_size}|block_size:{block_size}")
+        
+        chunk_size = max(block_size, int(chunk_size))
+        chunk_size = (chunk_size + block_size - 1) // block_size * block_size
+        scheduled_flops = self.calculate_current_flops(chunk_size, hist_seq_len, layer_idx)
+        
+        return chunk_size, scheduled_flops
+    
     def estimate_flops_ratio(self, chunk_size: int, kv_cache_len: int, layer_idx: Optional[int] = None) -> float:
         """
         Estimate FLOPs ratio (non-attention / attention)
